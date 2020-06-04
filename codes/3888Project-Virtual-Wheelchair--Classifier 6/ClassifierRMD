@@ -1,0 +1,45 @@
+---
+title: "classifier"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(readr)
+
+process <- function(x) {
+  as.numeric(gsub(" ","",x))
+}
+
+
+for(i in 1:4) {
+
+t1 <- read_csv(paste0("training_set_",i,".csv"), col_names = F)
+
+t1 <- as.character(data.frame(t1)[,1])
+
+t1 <- process(t1)
+
+y1 <- read_csv(paste0("training_set_instructions_",i,".csv"), col_names = F)
+
+y1 <- as.character(y1[1,1:11])
+```
+
+```{r}
+#convert to matrix
+tt1 <- matrix(t1, nrow = length(y1),   byrow = TRUE)
+
+#pca
+p = prcomp(tt1, scale. = TRUE)
+
+#use first 10 pcs
+features <- p$x[,1:10]
+
+d1 <- data.frame(features, instructions = y1)
+
+write.csv(d1, file=  paste0("converted_PCA_train",i,".csv"), row.names = F)
+
+}
+
+```
+
+

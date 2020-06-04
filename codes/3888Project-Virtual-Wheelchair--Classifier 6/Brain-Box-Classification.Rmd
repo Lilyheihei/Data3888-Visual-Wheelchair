@@ -1,0 +1,258 @@
+---
+title: "Brain box classification"
+author: "Siyue Yang 470013692"
+date: "04/04/2020"
+output:
+  html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(class)
+library(cvTools)
+library(ggplot2)
+library(sp)
+library(maps)
+library(leaflet)
+library(caret)
+library(tuneR)
+library(ggthemes)
+library(e1071) # For SVM classifier
+library(class) # For knn classifier
+library(scales)
+library(rucrdtw)
+```
+
+# Reading the data
+
+```{r}
+all_files_short <- list.files("/Users/apple/Desktop/report/zoe_spiker/Length3/")
+wave_file_short <- list() 
+for (i in all_files_short){
+    print(i)
+    wave_file_short <- c(wave_file_short, list(readWave(file.path("/Users/apple/Desktop/report/zoe_spiker/Length3/",i))))
+}
+```
+
+# Create labels
+
+```{r pressure}
+wave_label_short <- lapply(strsplit(all_files_short, "_"), "[[", 1)
+wave_label_short <- lapply(wave_label_short, function(x) strsplit(x, "")[[1]])
+```
+
+# Identify movement (event)
+
+```{r}
+#Part 1: Identify event
+identify_event <- function(Y,  xtime, 
+                                windowSize = 1, 
+                                thresholdEvents = 400, ## SD we use 650
+                                downSampleRate = 25) {
+  
+    # Step 1: Accounting for the edge of the sequence, we downsample the sequence and only select every 50 values.
+    x = max(xtime) - windowSize
+    indexLastWindow = max(which(xtime <= x)) + 1
+    ind = seq(1, indexLastWindow, by = downSampleRate)
+
+    # Step 2: Initialize time vector for middle of each window
+    timeMiddle <- xtime[ind] + windowSize/2 
+    testStat = rep(NA, length(ind))
+  
+    # Step 3: Calculate the SD in each window
+    for (i in 1:length(ind)) {
+        Y_subset <- Y[xtime >= xtime[ind[i]] & xtime < xtime[ind[i]] + windowSize]
+       testStat[i] <-  sd(Y_subset)
+##        testStat[i] <-sum(Y_subset[1:(length(Y_subset) - 1)] * 
+##                            Y_subset[2:(length(Y_subset))] <= 0)
+  }
+  
+    # Step 4: Simple threshold rule to determine the event
+    predictedEvent <- which(testStat > thresholdEvents)
+    eventTimes <- timeMiddle[predictedEvent] # map back to the time of this 
+  
+    # step 5: Identifying the noise intervals 
+    gaps <- which(diff(eventTimes) > mean(diff(eventTimes)))
+    noiseInterval <- rbind(
+                c(range(xtime)[1], min(eventTimes)),
+                cbind(eventTimes[gaps], eventTimes[gaps+1]),
+                c(max(eventTimes), range(xtime)[2])
+                )
+    
+    # step 6: eventIntervals 
+    # rearrange the matrix slightly to find the eventIntervals
+    eventsInterval <- cbind(noiseInterval[-nrow(noiseInterval),2], 
+                            noiseInterval[-1,1])
+    
+    return(list(num_event = length(gaps) + 1, 
+           predictedNoiseInterval = noiseInterval,
+           predictedEventInterval = eventsInterval))
+}
+
+##testing 
+wave_file = wave_file_short[[1]]
+Y = wave_file@left
+xtime = seq_len(length(wave_file))/wave_file@samp.rate 
+cut_result = identify_event(Y, xtime)
+cut_result
+```
+
+
+```{r}
+#Part 2: Extract signals for one data
+extractSignal = function(limits, seq, xtime)
+{
+    index = (xtime > limits[1]) & (xtime < limits[2])
+    return(seq[index])
+}
+wave_seq_short = apply(cut_result$predictedEventInterval, 1, extractSignal, Y, xtime)
+
+#Part 3: Extract signals for all 24 files
+wave_seq_short = list()
+for(i in 1:length(wave_file_short))
+{
+  # print(i)
+  wave_file = wave_file_short[[i]]
+  Y = wave_file@left
+  xtime = seq_len(length(wave_file))/wave_file@samp.rate 
+  cut_result = identify_event(Y, xtime)
+  wave_seq_short[[i]] = apply(cut_result$predictedEventInterval, 1, extractSignal, Y, xtime)
+}
+print('Extracted')
+```
+
+```{r}
+#Part 4: Quick look
+plot(wave_seq_short[[2]][[3]], type="l")
+```
+
+
+# Define a LRclassifier
+
+```{r}
+LRclassify = function(waveseq)
+{
+  maxPos = which.max(waveseq) ## the position of the maximum value
+  minPos = which.min(waveseq) ## the position of the minimum value
+  call = ifelse(maxPos < minPos, "L", "R") # L for left, R for right
+  return(call)
+}
+```
+
+# The impact of the sequence length
+
+To implement a classification model like KNN, LDA and SVM, the size of the input data should be rectangle. In other words, the length of observations should be equal to each other. In this case, the method is tend to truncate each obsesvation based on the minimum length of observations. In this assignment, we found that models (KNN and SVM) based on the truncated observations perform well although this preprocessing method cauces information loss.
+
+# Data preprocessing
+
+Presenting a data preprocessing process is needed.
+
+In the beginning, we notice that there are data entry errors.  Some sub lists in dataset *wave_seq_short* has a different length from the corresponding in the *wave_label_short*. For instance, the length of the $12_{th}$ sub list is $`r length(wave_seq_short[[12]])`$, involving some extremely short sequence and some NULL values, which means that the relevant wave sequences and wave labels is not in 1-to-1 correspondence.
+
+```{r}
+# Print the length
+print(paste0('wave_seq_short[[12]]: ', length(wave_seq_short[[12]])))
+print(paste0('wave_label_short[[12]]: ', length(wave_label_short[[12]])))
+```
+
+Hence, these sub lists would be removed in the later experiment.
+```{r}
+# Find the outlier sublist
+outlier.index = c()
+for (i in 1:length(wave_label_short)){
+  if (length(wave_label_short[[i]]) != length(sapply(wave_seq_short[[i]], LRclassify))){
+    outlier.index = append(outlier.index, c(i))}
+}
+
+# Remove the 12th sublist in wave_seq_short 
+wave_seq_short = wave_seq_short[-outlier.index]
+wave_label_short = wave_label_short[-outlier.index]
+
+# Convert wave_seq_short in a list
+wave_seq_short_list = list()
+k = 1
+for (i in 1:length(wave_seq_short)){
+  for (j in 1:length(wave_seq_short[[i]])){
+    wave_seq_short_list[[k]] = wave_seq_short[[i]][[j]]
+    k = k + 1
+  }
+}
+```
+
+# Testing with LRclassify
+
+```{r}
+# Flatten the original labels
+# Apply LRclassifier to each wave_seq_short
+classification.LR = c()
+labels <- c()
+for (i in 1:length(wave_label_short)){
+  labels = append(labels, wave_label_short[[i]])
+  classification.LR = append(sapply(wave_seq_short[[i]], LRclassify), classification.LR)
+}
+
+# Conduction the confusion matrix
+cm.LR = table(labels, classification.LR)
+print(cm.LR)
+
+# Print the accuracy
+acc.LR = percent(sum(diag(cm.LR)) / sum(cm.LR))
+print(paste0('accuracy: ', acc.LR))
+```
+The accuracy of the given LR classifer is only $31\%$ because the wave sequence is not stationary and linear. We are going to develop a KNN classifier and SVM classifier in the later experiment.
+
+# Develop a classifier and evaluate the performance
+
+## KNN classifier
+
+```{r}
+# Define dataset
+## Find the mininum length of wave_seq
+min_len = min(sapply(wave_seq_short_list, length))
+
+## Define the matrix
+wave_matrix = matrix(0, nrow = length(wave_seq_short_list), ncol = min_len)
+for (i in 1:length(wave_seq_short_list)){
+  wave_matrix[i,] = wave_seq_short_list[[i]][1:min_len]
+}
+
+## Conduct knn classifier
+knn.classification = knn(train = wave_matrix, test = wave_matrix, cl = as.factor(labels), k = 2)
+
+## Conduct the confusion matrix
+cm.knn = table(labels, knn.classification)
+print(cm.knn)
+
+## Comput the accuracy
+acc.knn = percent(sum(diag(cm.knn)) / sum(cm.knn))
+print(paste0('accuracy of knn classifier: ', acc.knn))
+```
+As is shown, the accuracy of KNN classifier is $88\%$, which is overperform the LR classifier.
+
+## Define a SVMclassifier
+```{r}
+## Build svm model
+svmfit = svm(x = wave_matrix, y = as.factor(labels),
+                  kernel = 'linear',
+                  cost = 10, scale = FALSE)
+
+## Make predictions
+svm.classification = predict(svmfit, wave_matrix)
+
+## Conduct the confusion matrix
+cm.svm = table(labels, svm.classification)
+print(cm.svm)
+
+## Comput the accuracy
+acc.svm = percent(sum(diag(cm.svm)) / sum(cm.svm))
+print(paste0('accuracy of svm classifier: ', acc.svm))
+```
+
+The above output illustrates the SVM classifier achieve perfect accuracy of $100\%$. But the overfitting should be considered. In face, we need more dataset for spliting the training data and testing data to reduce the overfitting.
+
+# A method for labelling errors and differences of the sequence length
+
+Artificial labelling error is another considerable problem. We mentioned that the truncation of sequences causes information loss. These two problems might have impact on the performance of classification models. We can change the labels of the same role to a unified name, that is, to replace the names of some labels. 
+
+In order to overcome the length problem and avoid information loss, we can fill the vacant position with 0 to make the length the same. 
+
